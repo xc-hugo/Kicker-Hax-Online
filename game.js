@@ -374,12 +374,13 @@ addEventListener('keyup', e=>{
 
   // Dispara o chute APENAS quando soltar a tecla configurada
   const tryRelease=(p,ctrl)=>{
-    if(!p || p.cpu) return;
+    if(!p || p.cpu || !ctrl) return;
     const isShoot = (ctrl.shoot && k===ctrl.shoot) || (ctrl.shootCode && c===ctrl.shootCode);
     if(isShoot) playerShootOnRelease(p);
   };
-  tryRelease(me, CTRL_P1);
-  tryRelease(p2, CTRL_P2);
+  // mapeia por TIME (Azul usa CTRL_P1; Vermelho usa CTRL_P2)
+  tryRelease(me, me ? (me.team===Team.BLUE?CTRL_P1:CTRL_P2) : null);
+  tryRelease(p2, p2 ? (p2.team===Team.BLUE?CTRL_P1:CTRL_P2) : null);
 });
 
 /* Se a janela perder o foco / mudar visibilidade, limpa entradas (corrige “andar sozinho”) */
@@ -545,6 +546,9 @@ function collidePlayerWithCorner(p, cx, cy, cr){
 
 /* ===== Times ===== */
 const Team={RED:0,BLUE:1}; const sideColor=t=>t===Team.RED?'#ef4444':'#60a5fa';
+
+// Helper global: controle por time
+const ctrlForTeam = (team)=> (team===Team.BLUE ? CTRL_P1 : CTRL_P2);
 
 class Body{constructor(x,y,r,m=1){this.x=x;this.y=y;this.vx=0;this.vy=0;this.r=r;this.m=m;} step(){this.x+=this.vx;this.y+=this.vy;}}
 class Ball extends Body{
@@ -809,7 +813,6 @@ class Player extends Body{
           this.aiFeintLock = 30;
         }
         if(this.aiFeintLock>0) this.aiFeintLock--;
-
         const shot2=clearShotToGoal(this);
         const midDist = distToGoal > 260 && distToGoal < 520;
         if(this.power_cd<=0 && this.aiShootLock<=0 && this.stamina>=0.999 && midDist && shot2.ok && shot2.score>1.45){
@@ -974,7 +977,16 @@ function playerBallCollisions(){ for(const p of players){ const c=circleCollisio
   ball.lastTouch=p;
 }}
 function touchBall(p,b){ return Math.hypot(p.x-b.x,p.y-b.y) < p.r+b.r+8; }
-function kickBall(p,ang,pow){ const px=Math.cos(ang||0),py=Math.sin(ang||0); ball.owner=null; ball.noPickupFrames=14; ball.noPickupFrom=p; ball.vx+=px*pow; ball.vy+=py*pow; ball.vx+=rnd(-0.05,0.05); ball.vy+=rnd(-0.05,0.05); ball.lastTouch=p; ball.markStrike('kick'); }
+function kickBall(p,ang,pow){
+  const px=Math.cos(ang||0),py=Math.sin(ang||0);
+  ball.owner=null; ball.noPickupFrames=14; ball.noPickupFrom=p;
+  ball.vx+=px*pow; ball.vy+=py*pow;
+  // Offline: pequeno ruído; Online: determinístico
+  if(!online.enabled){
+    ball.vx+=rnd(-0.05,0.05); ball.vy+=rnd(-0.05,0.05);
+  }
+  ball.lastTouch=p; ball.markStrike('kick');
+}
 function powerKick(p, angleOverride){ if(!(ball.owner===p || touchBall(p,ball))) return; const ang=(typeof angleOverride==='number')? angleOverride : (p.dir||0); kickBall(p,ang,POWER_KICK_POWER); p.power_cd=POWER_KICK_CD; p.cool=12; p.kickCharge=0; ball.markStrike('power'); }
 
 /* ===== Buffer de Replay (frames + SFX) ===== */
@@ -1392,6 +1404,9 @@ function endReplay(skipped=false){
 
 /* ===== Gols / Countdown ===== */
 function triggerGoal(side, toucher){
+  // Guest não processa gol; segue estado do host
+  if(online.enabled && !online.isHost) return;
+
   if(justScored) return;
   justScored=true;
   lastGoalSide = side;
@@ -1517,9 +1532,19 @@ function tick(){
   }
 
   if(!paused){
-    if(gameStarted && matchTime>0){ matchTime -= dt/1000; if(matchTime<0) matchTime=0; }
+    if(gameStarted && matchTime>0){
+      // Apenas o HOST decremente o relógio no online
+      if(!online.enabled || online.isHost){
+        matchTime -= dt/1000; if(matchTime<0) matchTime=0;
+      }
+    }
     if(gameStarted){
-      for(const p of players){ if(p.cpu) p.inputCPU(); else p.inputHuman(p===me?CTRL_P1:CTRL_P2); p.physics(); }
+      // Controle por time (Azul=P1, Vermelho=P2) — funciona em offline e online
+      for(const p of players){
+        if(p.cpu) p.inputCPU();
+        else p.inputHuman(ctrlForTeam(p.team));
+        p.physics();
+      }
       resolvePlayerPlayer(); playerBallCollisions();
       for(const p of players){ if(p.tackleEval>0 && ball.owner===p) p.tackleSuccess=true; }
       ball.physics(); 
@@ -1807,6 +1832,7 @@ const online = {
   db:null,
   auth:null,
   inputTimer:null,
+  stateTimer:null,   // <— batidas de estado (host → guest)
   unsubs:[],
 };
 
@@ -1834,7 +1860,6 @@ async function loadFirebaseModules(){
 }
 
 // Ajuste este objeto se preferir centralizar a config aqui.
-// DICA: o RTDB costuma ser: https://<projectId>-default-rtdb.firebaseio.com
 const FIREBASE_CONFIG = {
   apiKey: "AIzaSyBaVBJL8ibAFb8Pt9iKEQc753yruXhdBCw",
   authDomain: "kicker-hax-online.firebaseapp.com",
@@ -1843,7 +1868,6 @@ const FIREBASE_CONFIG = {
   messagingSenderId: "605132743845",
   appId: "1:605132743845:web:57f9641f5360689b17194c",
   measurementId: "G-6V2XVYZYL4",
-  // Tenta deduzir a URL do RTDB; se seu DB tiver outra, substitua por aquela do Console.
   databaseURL: "https://kicker-hax-online-default-rtdb.firebaseio.com"
 };
 
@@ -1915,7 +1939,7 @@ async function onlineStartQuickmatch(){
       applyAllPending(); setupTeams(); kickoff();
       gameStarted=true; paused=false; ensureAudio(); setModeOnlineLabel();
 
-      // Começa espelhamento de input
+      // Começa espelhamento de input + batidas de estado
       startOnlineInputLoop(FB);
       // Não precisamos mais ouvir a fila
       if(unsubQ) unsubQ();
@@ -1971,6 +1995,29 @@ function startOnlineInputLoop(FB){
     }
   });
   online.unsubs.push(()=>unsubOpp && unsubOpp());
+
+  // ===== SINCRONIZAÇÃO DE ESTADO (placar/relógio) =====
+  const stateRef = FB.ref(online.db, `rooms/${online.roomId}/state`);
+
+  if(online.isHost){
+    if(online.stateTimer) clearInterval(online.stateTimer);
+    online.stateTimer = setInterval(()=>{
+      FB.update(stateRef, {
+        t: Date.now(),
+        scoreRed: score.red,
+        scoreBlue: score.blue,
+        matchTimeMs: Math.round(matchTime*1000),
+      });
+    }, 300); // ~3x/s
+  }else{
+    const unsubState = FB.onValue(stateRef, (snap)=>{
+      const v = snap.val() || {};
+      if(typeof v.scoreRed === 'number') score.red = v.scoreRed;
+      if(typeof v.scoreBlue === 'number') score.blue = v.scoreBlue;
+      if(typeof v.matchTimeMs === 'number') matchTime = Math.max(0, v.matchTimeMs / 1000);
+    });
+    online.unsubs.push(()=>unsubState && unsubState());
+  }
 }
 
 async function onlineLeave(){
@@ -1992,6 +2039,7 @@ async function onlineLeave(){
   }catch{}
   // para timers e listeners
   clearInterval(online.inputTimer); online.inputTimer=null;
+  clearInterval(online.stateTimer); online.stateTimer=null;
   online.unsubs.forEach(u=>{ try{u();}catch{} }); online.unsubs.length=0;
 
   // limpa mapas remotos e volta estado
