@@ -1958,20 +1958,30 @@ function startOnlineInputLoop(FB){
   // Quem é remoto na minha simulação?
   // Host controla P1(Azul) local e recebe P2(remoto). Guest é o inverso.
   const remoteCtrl = online.isHost ? CTRL_P2 : CTRL_P1;
+  const myCtrl     = online.isHost ? CTRL_P1 : CTRL_P2;
 
   const myInputRef  = FB.ref(online.db, `rooms/${online.roomId}/inputs/${online.uid}`);
   const oppInputRef = FB.ref(online.db, `rooms/${online.roomId}/inputs/${online.oppUid}`);
 
-  // Envio (throttle ~20Hz)
+  // Envio (throttle ~20Hz) — envia AÇÕES normalizadas (independe do mapeamento do outro lado)
   if(online.inputTimer) clearInterval(online.inputTimer);
   online.inputTimer = setInterval(()=>{
-    // Envia somente as teclas/códigos true (economiza largura)
-    const kTrue = {};
-    for(const [k,v] of keys.entries()) if(v===true) kTrue[k]=true;
-    const cTrue = {};
-    for(const [c,v] of codes.entries()) if(v===true) cTrue[c]=true;
+    const downK = (k)=>!!(k && keys.get(k));
+    const downC = (c)=>!!(c && codes.get(c));
 
-    FB.update(myInputRef, { k:kTrue, c:cTrue, t: Date.now() });
+    const a = {
+      up:       downK(myCtrl.up),
+      down:     downK(myCtrl.down),
+      left:     downK(myCtrl.left),
+      right:    downK(myCtrl.right),
+      shoot:    downK(myCtrl.shoot) || downC(myCtrl.shootCode),
+      dribble:  downK(myCtrl.dribble),
+      tackle:   downK(myCtrl.tackle),
+      power:    downK(myCtrl.power) || downC(myCtrl.powerCode),
+      sprint:   downC(myCtrl.sprintCode) || downK(myCtrl.sprintKey),
+    };
+
+    FB.update(myInputRef, { a, t: Date.now() });
   }, 50);
   FB.onDisconnect(myInputRef).remove();
 
@@ -1979,20 +1989,42 @@ function startOnlineInputLoop(FB){
   let prevShoot = false; // para detectar soltura (release-to-shoot)
   const unsubOpp = FB.onValue(oppInputRef, (snap)=>{
     const d = snap.val() || {};
-    // guarda estado anterior do "shoot" remoto
-    prevShoot = !!(remoteKeys.get(remoteCtrl.shoot) || (remoteCtrl.shootCode && remoteCodes.get(remoteCtrl.shootCode)));
+    const a = d.a || null;
 
+    // Reconstrói mapas remotos a partir das AÇÕES normalizadas
     remoteKeys.clear(); remoteCodes.clear();
-    if(d.k){ for(const k in d.k) remoteKeys.set(k, true); }
-    if(d.c){ for(const c in d.c) remoteCodes.set(c, true); }
-
-    const nowShoot = !!(remoteKeys.get(remoteCtrl.shoot) || (remoteCtrl.shootCode && remoteCodes.get(remoteCtrl.shootCode)));
-
-    // Se antes estava pressionado e agora não, dispara o release remoto
-    if(prevShoot && !nowShoot){
-      const remotePlayer = online.isHost ? p2 : me;
-      playerShootOnRelease(remotePlayer);
+    if(a){
+      if(a.up && remoteCtrl.up) remoteKeys.set(remoteCtrl.up, true);
+      if(a.down && remoteCtrl.down) remoteKeys.set(remoteCtrl.down, true);
+      if(a.left && remoteCtrl.left) remoteKeys.set(remoteCtrl.left, true);
+      if(a.right && remoteCtrl.right) remoteKeys.set(remoteCtrl.right, true);
+      if(a.dribble && remoteCtrl.dribble) remoteKeys.set(remoteCtrl.dribble, true);
+      if(a.tackle && remoteCtrl.tackle) remoteKeys.set(remoteCtrl.tackle, true);
+      if(a.sprint){
+        if(remoteCtrl.sprintCode) remoteCodes.set(remoteCtrl.sprintCode, true);
+        if(remoteCtrl.sprintKey)  remoteKeys.set(remoteCtrl.sprintKey, true);
+      }
+      if(a.power){
+        if(remoteCtrl.power)     remoteKeys.set(remoteCtrl.power, true);
+        if(remoteCtrl.powerCode) remoteCodes.set(remoteCtrl.powerCode, true);
+      }
+      if(a.shoot){
+        if(remoteCtrl.shoot)     remoteKeys.set(remoteCtrl.shoot, true);
+        if(remoteCtrl.shootCode) remoteCodes.set(remoteCtrl.shootCode, true);
+      }
+    }else{
+      // Fallback para versões antigas (k/c brutas)
+      if(d.k){ for(const k in d.k) remoteKeys.set(k, true); }
+      if(d.c){ for(const c in d.c) remoteCodes.set(c, true); }
     }
+
+    // Detecta "soltou o chute" do remoto
+    const nowShoot = a ? !!a.shoot : !!(remoteKeys.get(remoteCtrl.shoot) || (remoteCtrl.shootCode && remoteCodes.get(remoteCtrl.shootCode)));
+    if(prevShoot && !nowShoot && p2){
+      // O oponente na minha simulação é SEMPRE p2
+      playerShootOnRelease(p2);
+    }
+    prevShoot = nowShoot;
   });
   online.unsubs.push(()=>unsubOpp && unsubOpp());
 
